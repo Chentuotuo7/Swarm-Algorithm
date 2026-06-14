@@ -5,7 +5,7 @@ import random
 from pathlib import Path
 
 
-GRID_SIZE = 30
+GRID_SIZE = 15
 CELL_SIZE = 1.0
 SLOPE_BUILDABLE_LIMIT = 0.45
 CA_RANDOM_SEED = 42
@@ -522,7 +522,7 @@ def generate_city_grid(grid_size=GRID_SIZE):
             "ca_iterations": CA_ITERATIONS,
             "smoothing_iterations": SMOOTHING_ITERATIONS,
             "seed_counts": SEED_COUNTS,
-            "description": "Basic 30x30 city terrain grid with hidden accessibility field for procedural medieval town generation.",
+            "description": f"Basic {grid_size}x{grid_size} city terrain grid with hidden accessibility field for procedural medieval town generation.",
         },
         "macro_states": states,
         "cells": cells,
@@ -531,7 +531,8 @@ def generate_city_grid(grid_size=GRID_SIZE):
 
 def export_grid_json(city_grid, output_dir=OUTPUT_DIR):
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "city_grid_30x30.json"
+    grid_size = city_grid["metadata"]["grid_size"]
+    output_path = output_dir / f"city_grid_{grid_size}x{grid_size}.json"
 
     with output_path.open("w", encoding="utf-8") as file:
         json.dump(city_grid, file, ensure_ascii=False, indent=2)
@@ -541,7 +542,8 @@ def export_grid_json(city_grid, output_dir=OUTPUT_DIR):
 
 def export_grid_csv(city_grid, output_dir=OUTPUT_DIR):
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "city_grid_30x30.csv"
+    grid_size = city_grid["metadata"]["grid_size"]
+    output_path = output_dir / f"city_grid_{grid_size}x{grid_size}.csv"
 
     fieldnames = [
         "x",
@@ -567,9 +569,8 @@ def export_grid_csv(city_grid, output_dir=OUTPUT_DIR):
 
 def export_macro_state_svg(city_grid, output_dir=OUTPUT_DIR):
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "macro_ca_level1_30x30.svg"
-
     grid_size = city_grid["metadata"]["grid_size"]
+    output_path = output_dir / f"macro_ca_level1_{grid_size}x{grid_size}.svg"
     cell_px = 24
     margin = 24
     legend_width = 230
@@ -588,7 +589,7 @@ def export_macro_state_svg(city_grid, output_dir=OUTPUT_DIR):
     lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
         '<rect width="100%" height="100%" fill="#f7f5ef"/>',
-        '<text x="24" y="18" font-family="Arial" font-size="14" font-weight="700" fill="#222">Macro CA Level 1 - 30x30 land state map</text>',
+        f'<text x="24" y="18" font-family="Arial" font-size="14" font-weight="700" fill="#222">Macro CA Level 1 - {grid_size}x{grid_size} land state map</text>',
     ]
 
     for cell in city_grid["cells"]:
@@ -676,11 +677,11 @@ def create_blender_grid(city_grid):
 
         material_indices.append(cell["state"])
 
-    mesh = bpy.data.meshes.new("terrain_surface_30x30_mesh")
+    mesh = bpy.data.meshes.new(f"terrain_surface_{grid_size}x{grid_size}_mesh")
     mesh.from_pydata(vertices, [], faces)
     mesh.update()
 
-    grid_object = bpy.data.objects.new("terrain_surface_30x30", mesh)
+    grid_object = bpy.data.objects.new(f"terrain_surface_{grid_size}x{grid_size}", mesh)
     bpy.context.collection.objects.link(grid_object)
     for state in [STATE_FOREST, STATE_LOW, STATE_MEDIUM, STATE_HIGH, STATE_TOWER, STATE_PLAZA]:
         grid_object.data.materials.append(state_materials[state])
@@ -708,11 +709,11 @@ def create_virtual_grid_lines(surface_vertices, grid_size, line_material):
             start = y * (grid_size + 1) + x
             edges.append((start, start + grid_size + 1))
 
-    line_mesh = bpy.data.meshes.new("virtual_grid_30x30_lines_mesh")
+    line_mesh = bpy.data.meshes.new(f"virtual_grid_{grid_size}x{grid_size}_lines_mesh")
     line_mesh.from_pydata(line_vertices, edges, [])
     line_mesh.update()
 
-    line_object = bpy.data.objects.new("virtual_grid_30x30_lines", line_mesh)
+    line_object = bpy.data.objects.new(f"virtual_grid_{grid_size}x{grid_size}_lines", line_mesh)
     bpy.context.collection.objects.link(line_object)
     line_object.data.materials.append(line_material)
 
@@ -747,7 +748,7 @@ def save_blender_scene(output_dir=OUTPUT_DIR):
         return None
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "city_grid_30x30.blend"
+    output_path = output_dir / f"city_grid_{GRID_SIZE}x{GRID_SIZE}.blend"
     bpy.ops.wm.save_as_mainfile(filepath=str(output_path))
     return output_path
 

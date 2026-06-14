@@ -429,7 +429,8 @@ def generate_city_grid_scheme2(grid_size=GRID_SIZE):
 
 def export_json(city_grid, output_dir=OUTPUT_DIR):
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "city_grid_30x30_scheme2.json"
+    grid_size = city_grid["metadata"]["grid_size"]
+    output_path = output_dir / f"city_grid_{grid_size}x{grid_size}_scheme2.json"
 
     with output_path.open("w", encoding="utf-8") as file:
         json.dump(city_grid, file, ensure_ascii=False, indent=2)
@@ -439,7 +440,8 @@ def export_json(city_grid, output_dir=OUTPUT_DIR):
 
 def export_csv(city_grid, output_dir=OUTPUT_DIR):
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "city_grid_30x30_scheme2.csv"
+    grid_size = city_grid["metadata"]["grid_size"]
+    output_path = output_dir / f"city_grid_{grid_size}x{grid_size}_scheme2.csv"
     fieldnames = [
         "x",
         "y",
@@ -469,9 +471,8 @@ def export_csv(city_grid, output_dir=OUTPUT_DIR):
 
 def export_svg(city_grid, output_dir=OUTPUT_DIR):
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "macro_ca_level1_30x30_scheme2.svg"
-
     grid_size = city_grid["metadata"]["grid_size"]
+    output_path = output_dir / f"macro_ca_level1_{grid_size}x{grid_size}_scheme2.svg"
     cell_px = 24
     margin = 24
     legend_width = 250
@@ -489,7 +490,7 @@ def export_svg(city_grid, output_dir=OUTPUT_DIR):
     lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
         '<rect width="100%" height="100%" fill="#f7f5ef"/>',
-        '<text x="24" y="18" font-family="Arial" font-size="14" font-weight="700" fill="#222">Macro CA Level 1 - Scheme 2</text>',
+        f'<text x="24" y="18" font-family="Arial" font-size="14" font-weight="700" fill="#222">Macro CA Level 1 - {grid_size}x{grid_size} Scheme 2</text>',
     ]
 
     for cell in city_grid["cells"]:
@@ -529,7 +530,7 @@ def save_blender_scene(output_dir=OUTPUT_DIR):
         return None
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "city_grid_30x30_scheme2.blend"
+    output_path = output_dir / f"city_grid_{GRID_SIZE}x{GRID_SIZE}_scheme2.blend"
     bpy.ops.wm.save_as_mainfile(filepath=str(output_path))
     return output_path
 

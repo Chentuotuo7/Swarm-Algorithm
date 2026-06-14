@@ -48,14 +48,8 @@ AREA_LIGHT_SIZE = 14.0
 RENDER_RESOLUTION_X = 1600
 RENDER_RESOLUTION_Y = 1000
 RANDOM_SEED = 42
-TERRAIN_STATE_COLORS = {
-    0: (0.45, 0.56, 0.40, 1.0),
-    1: (0.73, 0.71, 0.62, 1.0),
-    2: (0.68, 0.70, 0.74, 1.0),
-    3: (0.55, 0.58, 0.65, 1.0),
-    4: (0.74, 0.60, 0.34, 1.0),
-    5: (0.84, 0.80, 0.66, 1.0),
-}
+TERRAIN_Z_OFFSET = 0.0
+TERRAIN_HEIGHT_SAMPLER = None
 
 REQUIRED_BUILDING_FIELDS = {
     "id",
@@ -139,6 +133,8 @@ def validate_city_data(data: Any) -> dict[str, list[dict[str, Any]]]:
         raise CityDataError("city data must be a JSON object")
 
     normalized: dict[str, list[dict[str, Any]]] = {}
+    metadata = data.get("metadata", {})
+    normalized["metadata"] = metadata if isinstance(metadata, dict) else {}
     for field in TOP_LEVEL_LIST_FIELDS:
         value = data.get(field, [])
         if not isinstance(value, list):
@@ -249,45 +245,67 @@ def create_materials() -> dict[str, Any]:
         name: create_diffuse_material(name, color)
         for name, color in diffuse_materials.items()
     }
-    for state, color in TERRAIN_STATE_COLORS.items():
-        materials[f"mat_terrain_state_{state}"] = create_diffuse_material(
-            f"mat_terrain_state_{state}",
-            color,
-        )
     return materials
 
 
-def create_terrain_surface(terrain_data: dict[str, Any], materials: dict[str, Any]) -> Any:
+def get_world_scale(city_data: dict[str, Any]) -> float:
+    metadata = city_data.get("metadata", {})
+    if not isinstance(metadata, dict):
+        return 1.0
+    try:
+        return max(0.01, float(metadata.get("world_scale", 1.0)))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def scaled_terrain_height(centered_x: float, centered_y: float, grid_size: float, world_scale: float) -> float:
+    source_x = centered_x / world_scale + grid_size / 2
+    source_y = centered_y / world_scale + grid_size / 2
+    cx = (grid_size - 1) / 2
+    cy = (grid_size - 1) / 2
+    dx = (source_x - cx) / grid_size
+    dy = (source_y - cy) / grid_size
+    hill = 2.0 * math.exp(-7.0 * (dx * dx + dy * dy))
+    wave = 0.25 * math.sin(source_x * 0.25) + 0.2 * math.cos(source_y * 0.22)
+    return round(hill + wave, 3)
+
+
+def configure_terrain_sampler(terrain_data: dict[str, Any] | None, world_scale: float) -> None:
+    global TERRAIN_HEIGHT_SAMPLER
+    if terrain_data is None:
+        TERRAIN_HEIGHT_SAMPLER = None
+        return
+    metadata = terrain_data.get("metadata", {})
+    grid_size = float(metadata.get("grid_size", 30))
+
+    def sample(centered_x: float, centered_y: float) -> float:
+        return scaled_terrain_height(centered_x, centered_y, grid_size, world_scale)
+
+    TERRAIN_HEIGHT_SAMPLER = sample
+
+
+def create_terrain_surface(terrain_data: dict[str, Any], materials: dict[str, Any], world_scale: float = 1.0) -> Any:
     """Create a centered A-line 30x30 terrain surface mesh."""
 
     bpy = get_bpy()
     metadata = terrain_data.get("metadata", {})
     grid_size = int(metadata.get("grid_size", 30))
-    cell_size = float(metadata.get("cell_size", 1.0))
+    cell_size = float(metadata.get("cell_size", 1.0)) * world_scale
     offset = grid_size * cell_size / 2
 
-    cell_lookup = {
-        (int(cell["x"]), int(cell["y"])): cell
-        for cell in terrain_data["cells"]
-    }
     vertices: list[tuple[float, float, float]] = []
     faces: list[tuple[int, int, int, int]] = []
-    material_indexes: list[int] = []
 
     for vy in range(grid_size + 1):
         for vx in range(grid_size + 1):
-            neighbor_heights = [
-                cell_lookup[(cx, cy)]["height"]
-                for cx in (vx - 1, vx)
-                for cy in (vy - 1, vy)
-                if (cx, cy) in cell_lookup
-            ]
-            height = sum(neighbor_heights) / len(neighbor_heights) if neighbor_heights else 0.0
+            centered_x = vx * cell_size - offset
+            centered_y = vy * cell_size - offset
+            height = scaled_terrain_height(centered_x, centered_y, grid_size, world_scale)
             vertices.append(
                 (
-                    vx * cell_size - offset,
-                    vy * cell_size - offset,
-                    height,
+                    centered_x,
+                    centered_y,
+                    height + TERRAIN_Z_OFFSET,
                 )
             )
 
@@ -298,8 +316,6 @@ def create_terrain_surface(terrain_data: dict[str, Any], materials: dict[str, An
             top_left = (y + 1) * (grid_size + 1) + x
             top_right = top_left + 1
             faces.append((bottom_left, bottom_right, top_right, top_left))
-            cell = cell_lookup.get((x, y), {})
-            material_indexes.append(int(cell.get("state", 0)))
 
     mesh = bpy.data.meshes.new("Terrain_Surface_Mesh")
     mesh.from_pydata(vertices, [], faces)
@@ -307,10 +323,7 @@ def create_terrain_surface(terrain_data: dict[str, Any], materials: dict[str, An
     terrain = bpy.data.objects.new("Terrain_Surface", mesh)
     bpy.context.collection.objects.link(terrain)
 
-    for state in sorted(TERRAIN_STATE_COLORS):
-        terrain.data.materials.append(materials[f"mat_terrain_state_{state}"])
-    for polygon, material_index in zip(terrain.data.polygons, material_indexes):
-        polygon.material_index = max(0, min(material_index, len(TERRAIN_STATE_COLORS) - 1))
+    terrain.data.materials.append(materials["mat_ground"])
     return terrain
 
 
@@ -382,6 +395,8 @@ def create_road_batch(roads: list[dict[str, Any]], materials: dict[str, Any]) ->
 def project_to_terrain(x: float, y: float, z: float) -> float:
     """Return first-version terrain elevation for a point."""
 
+    if TERRAIN_HEIGHT_SAMPLER is not None:
+        return float(TERRAIN_HEIGHT_SAMPLER(x, y))
     return z
 
 
@@ -526,6 +541,139 @@ def create_gable_roof(
         roof.data.materials.append(material)
 
     return roof
+
+
+def polygon_center_2d(points: list[dict[str, float]]) -> tuple[float, float]:
+    return (
+        sum(float(point["x"]) for point in points) / len(points),
+        sum(float(point["y"]) for point in points) / len(points),
+    )
+
+
+def scale_footprint(
+    points: list[dict[str, float]],
+    margin: float,
+) -> list[tuple[float, float]]:
+    center_x, center_y = polygon_center_2d(points)
+    scaled = []
+    for point in points:
+        x = float(point["x"])
+        y = float(point["y"])
+        dx = x - center_x
+        dy = y - center_y
+        length = math.hypot(dx, dy)
+        factor = 1.0 if length <= 0.0001 else (length + margin) / length
+        scaled.append((center_x + dx * factor, center_y + dy * factor))
+    return scaled
+
+
+def footprint_edge_lengths(points: list[dict[str, float]]) -> tuple[float, float]:
+    bottom = math.hypot(points[1]["x"] - points[0]["x"], points[1]["y"] - points[0]["y"])
+    right = math.hypot(points[2]["x"] - points[1]["x"], points[2]["y"] - points[1]["y"])
+    top = math.hypot(points[2]["x"] - points[3]["x"], points[2]["y"] - points[3]["y"])
+    left = math.hypot(points[3]["x"] - points[0]["x"], points[3]["y"] - points[0]["y"])
+    return (bottom + top) / 2, (right + left) / 2
+
+
+def create_prism_batch(
+    name: str,
+    prisms: list[tuple[list[tuple[float, float]], float, float]],
+    material: Any,
+) -> Any:
+    """Create vertical prism meshes from arbitrary quadrilateral footprints."""
+
+    if not prisms:
+        return None
+
+    bpy = get_bpy()
+    vertices: list[tuple[float, float, float]] = []
+    faces: list[tuple[int, ...]] = []
+
+    for footprint, bottom, height in prisms:
+        if len(footprint) < 3:
+            continue
+        start = len(vertices)
+        top = bottom + height
+        vertices.extend((x, y, bottom) for x, y in footprint)
+        vertices.extend((x, y, top) for x, y in footprint)
+        count = len(footprint)
+        faces.append(tuple(range(start, start + count)))
+        faces.append(tuple(range(start + count, start + count * 2)))
+        for index in range(count):
+            next_index = (index + 1) % count
+            faces.append(
+                (
+                    start + index,
+                    start + next_index,
+                    start + count + next_index,
+                    start + count + index,
+                )
+            )
+
+    mesh = bpy.data.meshes.new(f"{name}_Mesh")
+    mesh.from_pydata(vertices, [], faces)
+    mesh.update()
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    if material is not None:
+        obj.data.materials.append(material)
+    return obj
+
+
+def create_gable_roof_footprint_batch(
+    roofs: list[tuple[list[dict[str, float]], float, float]],
+    material: Any,
+) -> Any:
+    """Create gable roofs that follow quadrilateral building footprints."""
+
+    if not roofs:
+        return None
+
+    bpy = get_bpy()
+    vertices: list[tuple[float, float, float]] = []
+    faces: list[tuple[int, ...]] = []
+
+    for footprint, z_top, roof_height in roofs:
+        if len(footprint) != 4:
+            continue
+        start = len(vertices)
+        width, depth = footprint_edge_lengths(footprint)
+        base_vertices = [(point["x"], point["y"], z_top) for point in footprint]
+        if width >= depth:
+            ridge_start = (
+                (footprint[0]["x"] + footprint[3]["x"]) / 2,
+                (footprint[0]["y"] + footprint[3]["y"]) / 2,
+                z_top + roof_height,
+            )
+            ridge_end = (
+                (footprint[1]["x"] + footprint[2]["x"]) / 2,
+                (footprint[1]["y"] + footprint[2]["y"]) / 2,
+                z_top + roof_height,
+            )
+            local_faces = [(0, 1, 2, 3), (0, 4, 5, 1), (3, 2, 5, 4), (0, 3, 4), (1, 5, 2)]
+        else:
+            ridge_start = (
+                (footprint[0]["x"] + footprint[1]["x"]) / 2,
+                (footprint[0]["y"] + footprint[1]["y"]) / 2,
+                z_top + roof_height,
+            )
+            ridge_end = (
+                (footprint[3]["x"] + footprint[2]["x"]) / 2,
+                (footprint[3]["y"] + footprint[2]["y"]) / 2,
+                z_top + roof_height,
+            )
+            local_faces = [(0, 1, 2, 3), (0, 4, 5, 3), (1, 2, 5, 4), (0, 1, 4), (3, 5, 2)]
+        vertices.extend(base_vertices + [ridge_start, ridge_end])
+        faces.extend(tuple(start + index for index in face) for face in local_faces)
+
+    mesh = bpy.data.meshes.new("Gable_Roof_Footprint_Batch_Mesh")
+    mesh.from_pydata(vertices, [], faces)
+    mesh.update()
+    obj = bpy.data.objects.new("Gable_Roof_Footprint_Batch", mesh)
+    bpy.context.collection.objects.link(obj)
+    if material is not None:
+        obj.data.materials.append(material)
+    return obj
 
 
 def create_box_batch(
@@ -1084,6 +1232,10 @@ def generate_city(
     tower_boxes: list[tuple[float, float, float, float, float, float]] = []
     foundation_boxes: list[tuple[float, float, float, float, float, float]] = []
     gable_roofs: list[tuple[float, float, float, float, float, float]] = []
+    house_prisms: list[tuple[list[tuple[float, float]], float, float]] = []
+    tower_prisms: list[tuple[list[tuple[float, float]], float, float]] = []
+    foundation_prisms: list[tuple[list[tuple[float, float]], float, float]] = []
+    footprint_roofs: list[tuple[list[dict[str, float]], float, float]] = []
 
     for building in data["buildings"]:
         base_z = project_to_terrain(building["x"], building["y"], building["z"])
@@ -1095,20 +1247,64 @@ def generate_city(
             min(building["width"], building["depth"]) * FOUNDATION_MARGIN_RATIO,
             FOUNDATION_MAX_MARGIN,
         )
-        foundation_boxes.append(
-            (
-                building["x"],
-                building["y"],
-                base_z - foundation_height / 2,
-                building["width"] + foundation_margin * 2,
-                building["depth"] + foundation_margin * 2,
-                foundation_height,
+        footprint = building.get("footprint")
+        if isinstance(footprint, list) and len(footprint) >= 3:
+            foundation_prisms.append(
+                (
+                    scale_footprint(footprint, foundation_margin),
+                    base_z - foundation_height,
+                    foundation_height,
+                )
             )
-        )
+        else:
+            foundation_boxes.append(
+                (
+                    building["x"],
+                    building["y"],
+                    base_z - foundation_height / 2,
+                    building["width"] + foundation_margin * 2,
+                    building["depth"] + foundation_margin * 2,
+                    foundation_height,
+                )
+            )
         foundation_count += 1
 
         if is_tower_building(building):
-            tower_boxes.append(
+            if isinstance(footprint, list) and len(footprint) >= 3:
+                tower_prisms.append(
+                    (
+                        [(float(point["x"]), float(point["y"])) for point in footprint],
+                        base_z,
+                        building["height"],
+                    )
+                )
+            else:
+                tower_boxes.append(
+                    (
+                        building["x"],
+                        building["y"],
+                        base_z + building["height"] / 2,
+                        building["width"],
+                        building["depth"],
+                        building["height"],
+                    )
+                )
+            tower_count += 1
+            continue
+
+        if not is_house_building(building):
+            continue
+
+        if isinstance(footprint, list) and len(footprint) >= 3:
+            house_prisms.append(
+                (
+                    [(float(point["x"]), float(point["y"])) for point in footprint],
+                    base_z,
+                    building["height"],
+                )
+            )
+        else:
+            house_boxes.append(
                 (
                     building["x"],
                     building["y"],
@@ -1118,42 +1314,33 @@ def generate_city(
                     building["height"],
                 )
             )
-            tower_count += 1
-            continue
-
-        if not is_house_building(building):
-            continue
-
-        house_boxes.append(
-            (
-                building["x"],
-                building["y"],
-                base_z + building["height"] / 2,
-                building["width"],
-                building["depth"],
-                building["height"],
-            )
-        )
         house_count += 1
 
         if has_gable_roof(building):
             roof_height = min(building["width"], building["depth"]) * ROOF_HEIGHT_RATIO
-            gable_roofs.append(
-                (
-                    building["x"],
-                    building["y"],
-                    base_z + building["height"],
-                    building["width"],
-                    building["depth"],
-                    roof_height,
+            if isinstance(footprint, list) and len(footprint) == 4:
+                footprint_roofs.append((footprint, base_z + building["height"], roof_height))
+            else:
+                gable_roofs.append(
+                    (
+                        building["x"],
+                        building["y"],
+                        base_z + building["height"],
+                        building["width"],
+                        building["depth"],
+                        roof_height,
+                    )
                 )
-            )
             gable_roof_count += 1
 
     create_box_batch("Foundation_Batch", foundation_boxes, foundation_material)
     create_box_batch("House_Batch", house_boxes, wall_material)
     create_box_batch("Tower_Batch", tower_boxes, wall_material)
     create_gable_roof_batch(gable_roofs, roof_material)
+    create_prism_batch("Foundation_Footprint_Batch", foundation_prisms, foundation_material)
+    create_prism_batch("House_Footprint_Batch", house_prisms, wall_material)
+    create_prism_batch("Tower_Footprint_Batch", tower_prisms, wall_material)
+    create_gable_roof_footprint_batch(footprint_roofs, roof_material)
 
     if data["trees"]:
         create_tree_batch(
@@ -1201,9 +1388,11 @@ def main(
         return city_data
 
     materials = create_materials()
+    world_scale = get_world_scale(city_data)
+    configure_terrain_sampler(terrain_data, world_scale)
     if terrain_data is not None:
-        create_terrain_surface(terrain_data, materials)
-        print(f"Generated terrain cells: {len(terrain_data['cells'])}.")
+        create_terrain_surface(terrain_data, materials, world_scale=world_scale)
+        print(f"Generated terrain cells: {len(terrain_data['cells'])} at world scale {world_scale:g}.")
     generated_counts = generate_city(city_data, materials)
     setup_camera_and_lighting()
     setup_render_settings()
