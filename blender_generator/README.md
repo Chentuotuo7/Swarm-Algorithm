@@ -36,7 +36,7 @@ python3 blender_generator/prepare_city_data.py \
   --output blender_generator/city_data_preview_small.json
 ```
 
-`--max-macro-cells` keeps whole 30x30 macro cells so local building groupings remain visible. `--max-buildings` and `--max-trees` are still available for even sampling across the full A-line output. Coordinates are centered to the A-line 30x30 grid by default; use `--no-recenter` only if you need the raw source coordinates.
+`--max-macro-cells` keeps whole macro cells so local building groupings remain visible. `--max-buildings` and `--max-trees` are still available for even sampling across the full A-line output. Coordinates are centered to the A-line macro grid by default; use `--no-recenter` only if you need the raw source coordinates.
 
 By default, each macro cell is capped for review clarity: low density keeps 2-4 buildings, medium keeps 4-6, high keeps 6-8, and tower cells keep 1 tower plus 2-4 podium houses. Selection prioritizes towers, larger footprints, and buildings near the macro-cell boundary. Use `--no-macro-building-cap` to keep the raw A-line density.
 

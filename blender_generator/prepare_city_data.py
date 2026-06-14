@@ -11,29 +11,34 @@ import argparse
 from collections import Counter
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Any
+
+try:
+    from blender_generator import agent_road_network
+except ImportError:
+    import agent_road_network
 
 
 DEFAULT_BUILDINGS_PATH = Path("output/city_buildings_scheme2_scaleA_mergeB.json")
 DEFAULT_TREES_PATH = Path("output/city_trees_scheme2_scaleA_mergeB.csv")
-DEFAULT_MACRO_GRID_PATH = Path("output/city_grid_30x30_scheme2.json")
+DEFAULT_MACRO_GRID_PATH = Path("output/city_grid_15x15_scheme2.json")
 DEFAULT_OUTPUT_PATH = Path("blender_generator/city_data.json")
-A_LINE_GRID_SIZE = 30.0
+A_LINE_GRID_SIZE = 15.0
 A_LINE_CELL_SIZE = 1.0
 VISUAL_FLOOR_HEIGHT = 0.14
 HOUSE_MIN_FLOORS = 2
 HOUSE_MAX_FLOORS = 3
-TOWER_VISUAL_FLOORS = 6
+TOWER_MIN_VISUAL_FLOORS = 8
+TOWER_MAX_VISUAL_FLOORS = 9
+TOWER_MIN_VISUAL_FOOTPRINT = 0.24
 MACRO_BUILDING_CAPS = {
     "low": (2, 4),
     "medium": (4, 6),
     "high": (6, 8),
 }
 TOWER_PODIUM_CAP_RANGE = (2, 4)
-MICRO_PATH_STATE = 3
-MICRO_COURTYARD_STATE = 2
-ROAD_Z_OFFSET = 0.018
 
 REQUIRED_BUILDING_FIELDS = {
     "id",
@@ -77,7 +82,10 @@ def normalize_visual_height(building: dict[str, Any]) -> None:
     building.setdefault("source_floor_count", building.get("floor_count"))
     building.setdefault("source_height", building.get("height"))
     if building["is_tower"]:
-        floor_count = TOWER_VISUAL_FLOORS
+        floor_span = TOWER_MAX_VISUAL_FLOORS - TOWER_MIN_VISUAL_FLOORS + 1
+        floor_count = TOWER_MIN_VISUAL_FLOORS + building["id"] % floor_span
+        building["width"] = max(building["width"], TOWER_MIN_VISUAL_FOOTPRINT)
+        building["depth"] = max(building["depth"], TOWER_MIN_VISUAL_FOOTPRINT)
     else:
         floor_span = HOUSE_MAX_FLOORS - HOUSE_MIN_FLOORS + 1
         floor_count = HOUSE_MIN_FLOORS + building["id"] % floor_span
@@ -108,6 +116,20 @@ def load_buildings(path: Path) -> list[dict[str, Any]]:
         item["id"] = _to_int(item["id"], f"building {index}.id")
         for field in NUMERIC_BUILDING_FIELDS:
             item[field] = _to_float(item[field], f"building {index}.{field}")
+        if "footprint" in item:
+            if not isinstance(item["footprint"], list) or len(item["footprint"]) < 3:
+                raise AdapterError(f"building {index}.footprint must be a list of at least 3 points")
+            normalized_footprint = []
+            for point_index, point in enumerate(item["footprint"]):
+                if not isinstance(point, dict):
+                    raise AdapterError(f"building {index}.footprint[{point_index}] must be an object")
+                normalized_footprint.append(
+                    {
+                        "x": _to_float(point.get("x"), f"building {index}.footprint[{point_index}].x"),
+                        "y": _to_float(point.get("y"), f"building {index}.footprint[{point_index}].y"),
+                    }
+                )
+            item["footprint"] = normalized_footprint
         item["is_tower"] = bool(item["is_tower"])
         normalize_visual_height(item)
         normalized.append(item)
@@ -156,126 +178,16 @@ def load_trees(path: Path) -> list[dict[str, float]]:
     return trees
 
 
-def center_xy(x: float, y: float) -> tuple[float, float]:
-    grid_offset = A_LINE_GRID_SIZE * A_LINE_CELL_SIZE / 2
+def center_xy(
+    x: float,
+    y: float,
+    grid_size: float = A_LINE_GRID_SIZE,
+) -> tuple[float, float]:
+    grid_offset = grid_size * A_LINE_CELL_SIZE / 2
     return (
         round(x * A_LINE_CELL_SIZE - grid_offset, 4),
         round(y * A_LINE_CELL_SIZE - grid_offset, 4),
     )
-
-
-def road_point(x: float, y: float, z: float) -> list[float]:
-    centered_x, centered_y = center_xy(x, y)
-    return [centered_x, centered_y, round(z + ROAD_Z_OFFSET, 4)]
-
-
-def build_macro_roads(macro_grid: dict[str, Any] | None) -> list[dict[str, Any]]:
-    if macro_grid is None:
-        return []
-
-    cells = macro_grid["cells"]
-    cell_lookup = {(int(cell["x"]), int(cell["y"])): cell for cell in cells}
-    targets = [
-        cell for cell in cells
-        if cell.get("state") in (3, 4, 5) or cell.get("type") == "plaza"
-    ]
-    if not targets:
-        return []
-
-    center = (A_LINE_GRID_SIZE - 1) / 2
-    hub = min(
-        targets,
-        key=lambda cell: (cell["x"] - center) ** 2 + (cell["y"] - center) ** 2,
-    )
-
-    roads: list[dict[str, Any]] = []
-    road_id = 1
-    boundary_points = [
-        (0, int(round(hub["y"]))),
-        (int(round(hub["x"])), 0),
-        (int(A_LINE_GRID_SIZE - 1), int(round(hub["y"]))),
-        (int(round(hub["x"])), int(A_LINE_GRID_SIZE - 1)),
-    ]
-    for end_x, end_y in boundary_points:
-        points = []
-        step_x = 1 if end_x >= hub["x"] else -1
-        for x in range(int(hub["x"]), end_x + step_x, step_x):
-            cell = cell_lookup.get((x, int(hub["y"])), hub)
-            points.append(road_point(x + 0.5, hub["y"] + 0.5, cell["height"]))
-        step_y = 1 if end_y >= hub["y"] else -1
-        for y in range(int(hub["y"]) + step_y, end_y + step_y, step_y):
-            cell = cell_lookup.get((end_x, y), hub)
-            points.append(road_point(end_x + 0.5, y + 0.5, cell["height"]))
-        roads.append(
-            {
-                "id": road_id,
-                "level": "primary",
-                "width": 0.22,
-                "points": points,
-            }
-        )
-        road_id += 1
-
-    for target in sorted(targets, key=lambda cell: cell.get("accessibility", 0), reverse=True)[:28]:
-        if target is hub:
-            continue
-        points = [
-            road_point(hub["x"] + 0.5, hub["y"] + 0.5, hub["height"]),
-            road_point(target["x"] + 0.5, hub["y"] + 0.5, hub["height"]),
-            road_point(target["x"] + 0.5, target["y"] + 0.5, target["height"]),
-        ]
-        roads.append(
-            {
-                "id": road_id,
-                "level": "secondary",
-                "width": 0.13,
-                "points": points,
-            }
-        )
-        road_id += 1
-
-    return roads
-
-
-def build_micro_roads(
-    micro_cells: list[dict[str, Any]],
-    selected_macro_keys: set[tuple[Any, Any]] | None = None,
-    start_id: int = 1,
-) -> list[dict[str, Any]]:
-    path_cells = {
-        (cell["macro_x"], cell["macro_y"], cell["micro_x"], cell["micro_y"]): cell
-        for cell in micro_cells
-        if cell.get("state") in (MICRO_PATH_STATE, MICRO_COURTYARD_STATE)
-        and (
-            selected_macro_keys is None
-            or (cell.get("macro_x"), cell.get("macro_y")) in selected_macro_keys
-        )
-    }
-    roads: list[dict[str, Any]] = []
-    road_id = start_id
-    for key, cell in sorted(path_cells.items()):
-        macro_x, macro_y, micro_x, micro_y = key
-        for dx, dy in ((1, 0), (0, 1)):
-            neighbor = path_cells.get((macro_x, macro_y, micro_x + dx, micro_y + dy))
-            if neighbor is None:
-                continue
-            level = "courtyard_path" if (
-                cell.get("state") == MICRO_COURTYARD_STATE
-                or neighbor.get("state") == MICRO_COURTYARD_STATE
-            ) else "alley"
-            roads.append(
-                {
-                    "id": road_id,
-                    "level": level,
-                    "width": 0.055 if level == "alley" else 0.075,
-                    "points": [
-                        road_point(cell["x"], cell["y"], cell["z"]),
-                        road_point(neighbor["x"], neighbor["y"], neighbor["z"]),
-                    ],
-                }
-            )
-            road_id += 1
-    return roads
 
 
 def evenly_sample(items: list[dict[str, Any]], limit: int | None) -> list[dict[str, Any]]:
@@ -418,11 +330,13 @@ def select_macro_groups(
 
 
 def recenter_a_line_coordinates(city_data: dict[str, Any]) -> None:
-    """Match A-line Blender preview coordinates by centering the 30x30 grid."""
+    """Match A-line Blender preview coordinates by centering the macro grid."""
 
-    grid_offset = A_LINE_GRID_SIZE * A_LINE_CELL_SIZE / 2
     for building in city_data["buildings"]:
         building["x"], building["y"] = center_xy(building["x"], building["y"])
+        if "footprint" in building:
+            for point in building["footprint"]:
+                point["x"], point["y"] = center_xy(point["x"], point["y"])
     for tree in city_data["trees"]:
         tree["x"], tree["y"] = center_xy(tree["x"], tree["y"])
 
@@ -441,7 +355,9 @@ def build_city_data(
     buildings = load_buildings(buildings_path)
     trees = load_trees(trees_path)
     macro_grid = load_macro_grid(macro_grid_path)
-    if cap_macro_buildings:
+    spatial_cell_model = building_payload.get("metadata", {}).get("spatial_cell_model", "")
+    is_parcel_mode = str(spatial_cell_model).startswith("road_") and "parcel" in str(spatial_cell_model)
+    if cap_macro_buildings and not is_parcel_mode:
         buildings = cap_buildings_per_macro(buildings)
     buildings, trees = select_macro_groups(buildings, trees, max_macro_cells)
     selected_macro_keys = {get_macro_key(building) for building in buildings}
@@ -450,23 +366,50 @@ def build_city_data(
         trees = evenly_sample(trees, max_trees)
         selected_macro_keys = None
 
-    roads = build_macro_roads(macro_grid)
-    roads.extend(
-        build_micro_roads(
-            building_payload.get("micro_cells", []),
-            selected_macro_keys=selected_macro_keys,
-            start_id=len(roads) + 1,
-        )
-    )
+    road_graph = building_payload.get("road_graph")
+    if not isinstance(road_graph, dict):
+        raise AdapterError(f"{buildings_path} missing required road_graph object")
+    world_scale = float(building_payload.get("metadata", {}).get("world_scale", 1.0) or 1.0)
 
     city_data = {
+        "metadata": {
+            "source_spatial_cell_model": building_payload.get("metadata", {}).get("spatial_cell_model"),
+            "world_scale": world_scale,
+            "height_model": building_payload.get("metadata", {}).get("height_model", "shared_scaled_terrain_sampler"),
+        },
         "buildings": buildings,
         "trees": trees,
-        "roads": roads,
+        "roads": agent_road_network.road_graph_to_blender_roads(
+            road_graph,
+            z_lookup=terrain_height_lookup(macro_grid, world_scale=world_scale),
+        ),
     }
     if recenter:
         recenter_a_line_coordinates(city_data)
     return city_data
+
+
+def scaled_terrain_height(centered_x: float, centered_y: float, grid_size: float, world_scale: float) -> float:
+    source_x = centered_x / world_scale + grid_size / 2
+    source_y = centered_y / world_scale + grid_size / 2
+    cx = (grid_size - 1) / 2
+    cy = (grid_size - 1) / 2
+    dx = (source_x - cx) / grid_size
+    dy = (source_y - cy) / grid_size
+    hill = 2.0 * math.exp(-7.0 * (dx * dx + dy * dy))
+    wave = 0.25 * math.sin(source_x * 0.25) + 0.2 * math.cos(source_y * 0.22)
+    return round(hill + wave, 3)
+
+
+def terrain_height_lookup(macro_grid: dict[str, Any] | None, world_scale: float = 1.0):
+    if macro_grid is None:
+        return None
+    grid_size = float(macro_grid.get("metadata", {}).get("grid_size", A_LINE_GRID_SIZE))
+
+    def lookup(centered_x: float, centered_y: float) -> float:
+        return scaled_terrain_height(centered_x, centered_y, grid_size, world_scale)
+
+    return lookup
 
 
 def write_city_data(city_data: dict[str, Any], output_path: Path) -> None:
@@ -525,7 +468,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-recenter",
         action="store_true",
-        help="Keep original A-line x/y coordinates instead of centering the 30x30 grid.",
+        help="Keep original A-line x/y coordinates instead of centering the macro grid.",
     )
     parser.add_argument(
         "--no-macro-building-cap",

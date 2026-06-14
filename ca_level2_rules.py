@@ -2,7 +2,7 @@ import math
 import random
 
 
-MICRO_GRID_SIZE = 6
+MICRO_GRID_SIZE = 4
 MICRO_CA_ITERATIONS = 5
 MICRO_RANDOM_SEED = 128
 
@@ -45,7 +45,7 @@ MACRO_PARAMS = {
         "tree_probability": 0.08,
         "path_probability": 0.14,
         "height_range": (2, 4),
-        "tower_probability": 0.002,
+        "tower_probability": 0.035,
     },
     3: {
         "name": "high",
@@ -53,7 +53,7 @@ MACRO_PARAMS = {
         "tree_probability": 0.03,
         "path_probability": 0.08,
         "height_range": (3, 6),
-        "tower_probability": 0.006,
+        "tower_probability": 0.065,
     },
     4: {
         "name": "tower_candidate",
@@ -108,6 +108,18 @@ def count_micro_states(states, mx, my, micro_grid_size=MICRO_GRID_SIZE):
     return counts
 
 
+def is_near_locked_path(mx, my, locked_path_cells):
+    if not locked_path_cells:
+        return False
+    for ny in range(my - 1, my + 2):
+        for nx in range(mx - 1, mx + 2):
+            if nx == mx and ny == my:
+                continue
+            if (nx, ny) in locked_path_cells:
+                return True
+    return False
+
+
 def get_micro_center_score(mx, my, micro_grid_size=MICRO_GRID_SIZE):
     center = (micro_grid_size - 1) / 2
     distance = math.hypot(mx - center, my - center)
@@ -140,7 +152,8 @@ def create_path_bias(macro_cell, rng, micro_grid_size=MICRO_GRID_SIZE):
     return path_cells
 
 
-def initialize_micro_states(macro_cell, micro_grid_size=MICRO_GRID_SIZE):
+def initialize_micro_states(macro_cell, micro_grid_size=MICRO_GRID_SIZE, locked_path_cells=None):
+    locked_path_cells = locked_path_cells or set()
     rng = random.Random(MICRO_RANDOM_SEED + macro_cell["x"] * 1009 + macro_cell["y"] * 917)
     macro_state = macro_cell["state"]
     params = MACRO_PARAMS[macro_state]
@@ -149,6 +162,10 @@ def initialize_micro_states(macro_cell, micro_grid_size=MICRO_GRID_SIZE):
 
     for my in range(micro_grid_size):
         for mx in range(micro_grid_size):
+            if (mx, my) in locked_path_cells:
+                states[my][mx] = MICRO_PATH
+                continue
+
             if macro_state == 0:
                 states[my][mx] = MICRO_TREE if rng.random() < params["tree_probability"] else MICRO_EMPTY
                 continue
@@ -170,6 +187,8 @@ def initialize_micro_states(macro_cell, micro_grid_size=MICRO_GRID_SIZE):
                 + (noise - 0.5) * 0.18
                 - edge_score * 0.10
             )
+            if is_near_locked_path(mx, my, locked_path_cells) and macro_state in (1, 2, 3, 4):
+                building_probability += 0.18
 
             if macro_state == 5:
                 building_probability *= 0.35
@@ -187,7 +206,20 @@ def initialize_micro_states(macro_cell, micro_grid_size=MICRO_GRID_SIZE):
     return states
 
 
-def choose_next_micro_state(current_state, counts, macro_cell, mx, my, rng, micro_grid_size=MICRO_GRID_SIZE):
+def choose_next_micro_state(
+    current_state,
+    counts,
+    macro_cell,
+    mx,
+    my,
+    rng,
+    micro_grid_size=MICRO_GRID_SIZE,
+    locked_path_cells=None,
+):
+    locked_path_cells = locked_path_cells or set()
+    if (mx, my) in locked_path_cells:
+        return MICRO_PATH
+
     macro_state = macro_cell["state"]
     params = MACRO_PARAMS[macro_state]
     building_neighbors = counts[MICRO_BUILDING] + counts[MICRO_TOWER]
@@ -213,6 +245,8 @@ def choose_next_micro_state(current_state, counts, macro_cell, mx, my, rng, micr
         3: 0.56,
         4: 0.42,
     }.get(macro_state, 0.28)
+    if is_near_locked_path(mx, my, locked_path_cells) and macro_state in (1, 2, 3, 4):
+        growth_bonus += 0.18
 
     if current_state == MICRO_BUILDING:
         if building_neighbors >= 7:
@@ -251,7 +285,8 @@ def choose_next_micro_state(current_state, counts, macro_cell, mx, my, rng, micr
     return current_state
 
 
-def evolve_micro_states(macro_cell, states, micro_grid_size=MICRO_GRID_SIZE):
+def evolve_micro_states(macro_cell, states, micro_grid_size=MICRO_GRID_SIZE, locked_path_cells=None):
+    locked_path_cells = locked_path_cells or set()
     rng = random.Random(MICRO_RANDOM_SEED + 3000 + macro_cell["x"] * 101 + macro_cell["y"] * 103)
 
     for _ in range(MICRO_CA_ITERATIONS):
@@ -267,13 +302,15 @@ def evolve_micro_states(macro_cell, states, micro_grid_size=MICRO_GRID_SIZE):
                     my,
                     rng,
                     micro_grid_size,
+                    locked_path_cells,
                 )
         states = next_states
 
     return states
 
 
-def place_tower_if_needed(macro_cell, states, micro_grid_size=MICRO_GRID_SIZE):
+def place_tower_if_needed(macro_cell, states, micro_grid_size=MICRO_GRID_SIZE, locked_path_cells=None):
+    locked_path_cells = locked_path_cells or set()
     rng = random.Random(MICRO_RANDOM_SEED + 9000 + macro_cell["x"] * 313 + macro_cell["y"] * 317)
     macro_state = macro_cell["state"]
     params = MACRO_PARAMS[macro_state]
@@ -291,6 +328,8 @@ def place_tower_if_needed(macro_cell, states, micro_grid_size=MICRO_GRID_SIZE):
     candidates = []
     for my in range(1, micro_grid_size - 1):
         for mx in range(1, micro_grid_size - 1):
+            if (mx, my) in locked_path_cells:
+                continue
             counts = count_micro_states(states, mx, my, micro_grid_size)
             building_neighbors = counts[MICRO_BUILDING] + counts[MICRO_TOWER]
             if states[my][mx] in (MICRO_BUILDING, MICRO_EMPTY, MICRO_PATH) and building_neighbors >= 2:
@@ -306,10 +345,11 @@ def place_tower_if_needed(macro_cell, states, micro_grid_size=MICRO_GRID_SIZE):
     return states
 
 
-def generate_micro_layout(macro_cell, micro_grid_size=MICRO_GRID_SIZE):
-    states = initialize_micro_states(macro_cell, micro_grid_size)
-    states = evolve_micro_states(macro_cell, states, micro_grid_size)
-    states = place_tower_if_needed(macro_cell, states, micro_grid_size)
+def generate_micro_layout(macro_cell, micro_grid_size=MICRO_GRID_SIZE, locked_path_cells=None):
+    locked_path_cells = locked_path_cells or set()
+    states = initialize_micro_states(macro_cell, micro_grid_size, locked_path_cells)
+    states = evolve_micro_states(macro_cell, states, micro_grid_size, locked_path_cells)
+    states = place_tower_if_needed(macro_cell, states, micro_grid_size, locked_path_cells)
     return states
 
 
